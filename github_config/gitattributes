@@ -1,0 +1,83 @@
+# ============================================================================
+# .gitattributes TEMPLATE
+#
+# Copied to <project>/.gitattributes by init-git.sh.
+#
+# While .gitignore says WHICH files git should track, .gitattributes says HOW
+# git should handle the ones it does track.
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Line-ending normalisation.
+#
+# macOS/Linux end a line with LF; Windows uses CRLF. Git compares bytes, so
+# without this a collaborator on the other platform makes every line of a file
+# look changed — useless diffs and conflicts on every line.
+#
+# `text=auto` tells git: detect text files, always store them with LF inside
+# the repository, and convert to the local convention on checkout.
+#
+# This lives here rather than in each person's core.autocrlf setting because
+# .gitattributes is committed, so it applies to everyone automatically. Relying
+# on per-user config fails the moment one collaborator has not set it.
+# ---------------------------------------------------------------------------
+* text=auto
+
+
+# ---------------------------------------------------------------------------
+# Explicit binary marking.
+#
+# `-text` means "never apply line-ending conversion". Auto-detection is good
+# but not perfect, and a single mangled byte corrupts a binary file. Being
+# explicit for known formats removes the risk.
+#
+# `-diff` additionally stops git from attempting a textual diff, so output
+# reads "Binary files differ" instead of pages of noise.
+# ---------------------------------------------------------------------------
+*.pdf    -text -diff
+*.png    -text -diff
+*.jpg    -text -diff
+*.jpeg   -text -diff
+*.gif    -text -diff
+*.ico    -text -diff
+*.pkl    -text -diff
+*.pickle -text -diff
+*.npy    -text -diff
+*.npz    -text -diff
+*.h5     -text -diff
+*.hdf5   -text -diff
+*.parquet -text -diff
+*.xlsx   -text -diff
+*.xls    -text -diff
+*.zip    -text -diff
+*.gz     -text -diff
+*.bz2    -text -diff
+*.tar    -text -diff
+
+
+# ---------------------------------------------------------------------------
+# Jupyter notebooks.
+#
+# Notebooks are JSON, so they are text — but they embed output cells and
+# execution counts that change on every run, producing enormous diffs.
+# Keeping them as text still lets you merge them; consider a tool like
+# nbstripout or jupytext if the noise becomes a problem.
+# ---------------------------------------------------------------------------
+*.ipynb  text
+
+
+# ---------------------------------------------------------------------------
+# Tabular data kept in git (small files only — large ones belong in DVC).
+# Marked as text so line endings stay consistent across platforms.
+# ---------------------------------------------------------------------------
+*.tsv    text
+*.csv    text
+
+
+# ---------------------------------------------------------------------------
+# Shell scripts must keep LF endings even if checked out on Windows.
+# A CRLF line ending in a script makes the shebang line read as
+# "/usr/bin/env bash\r", which fails with a confusing "bad interpreter" error.
+# ---------------------------------------------------------------------------
+*.sh     text eol=lf

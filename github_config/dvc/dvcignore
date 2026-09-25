@@ -1,0 +1,56 @@
+# ============================================================================
+# .dvcignore TEMPLATE
+#
+# Copied to <project>/.dvcignore by init-dvc.sh.
+#
+# Same syntax as .gitignore, but a different audience: this tells DVC which
+# paths to skip when it walks a tracked folder to hash its contents.
+#
+# Why bother? `dvc add` on a large data directory has to read and checksum
+# every file underneath it. Excluding junk makes that faster and keeps the
+# junk out of the DVC cache and off the remote.
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Operating system metadata that sync clients scatter through data folders.
+# ---------------------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+
+# ---------------------------------------------------------------------------
+# Editor and tooling scratch files.
+# ---------------------------------------------------------------------------
+*.swp
+*.swo
+*~
+.ipynb_checkpoints/
+
+
+# ---------------------------------------------------------------------------
+# Temporary and partial files.
+# Half-written downloads and intermediate scratch should not be checksummed
+# into a data version — they are not part of the dataset.
+# ---------------------------------------------------------------------------
+*.tmp
+*.temp
+*.partial
+*.crdownload
+*.part
+
+
+# ---------------------------------------------------------------------------
+# Logs produced by pipeline runs inside the data directory.
+# ---------------------------------------------------------------------------
+*.log
+
+
+# ---------------------------------------------------------------------------
+# Cloud-sync conflict copies. OneDrive, Dropbox and Box create these when the
+# same file is edited in two places; they are duplicates, never real data.
+# ---------------------------------------------------------------------------
+*conflicted copy*
+*Conflict*

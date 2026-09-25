@@ -1,0 +1,120 @@
+# ============================================================================
+# .gitignore TEMPLATE
+#
+# This file is copied to <project>/.gitignore by init-git.sh.
+# It is named without a leading dot so it stays visible in this folder and
+# does not accidentally apply to the repo that holds the template itself.
+#
+# NOTE ON DATA: this template deliberately does NOT ignore src/<project>/data.
+# Under the git-only workflow that data is tracked by git. When you later run
+# dvc/init-dvc.sh, `dvc add` writes its own .gitignore next to the data folder
+# that excludes it — so the switch happens automatically, and you never edit
+# this file to make it happen.
+# ============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Python bytecode and caches
+# Regenerated from source on every run — never worth committing.
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+
+# ---------------------------------------------------------------------------
+# Build artifacts and packaging metadata
+# `pip install -e .` regenerates *.egg-info on every install. Tracking it means
+# a dirty working tree after each reinstall and merge conflicts on a generated
+# file, so it stays out.
+# ---------------------------------------------------------------------------
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# Machine-specific and large. Recreate from environment.yml / requirements.txt.
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+
+# ---------------------------------------------------------------------------
+# Jupyter
+# .ipynb_checkpoints holds autosaves; pure noise. No leading slash, so this
+# matches the folder at ANY depth in the tree.
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+
+# ---------------------------------------------------------------------------
+# Secrets and credentials
+# Anything committed here is as public as the repo. Keep API keys in a .env
+# file or a local config that is never tracked.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+
+# ---------------------------------------------------------------------------
+# Editor, IDE and dev-environment state
+# Personal tooling setup rather than project source.
+#
+# .devcontainer/ is excluded by choice. It defines a reproducible dev
+# environment, so many projects track it — if you want collaborators to get
+# that setup from a clone, delete the line below, or override per-project
+# with:  git add -f .devcontainer/
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.devcontainer/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+
+# ---------------------------------------------------------------------------
+# Operating system cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+
+# ---------------------------------------------------------------------------
+# Logs and scratch output
+# ---------------------------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.bak
+out.json
+
+
+# ---------------------------------------------------------------------------
+# Large local data that is NOT under version control of any kind.
+# Manual backups and ad-hoc score dumps belong here — if something needs
+# history, put it under src/<project>/data and let DVC handle it instead.
+# ---------------------------------------------------------------------------
+data_backup/
+scratch/
