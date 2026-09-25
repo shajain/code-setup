@@ -108,7 +108,17 @@ Desktop.ini
 logs/
 *.tmp
 *.bak
-out.json
+#out.json
+
+# --- Scratch  ---
+*.tmp
+.cache/
+
+# --- Crash dumps (investigate before deleting, don't commit) ---
+core
+core.[0-9]*
+*.core
+vgcore.*
 
 
 # ---------------------------------------------------------------------------
