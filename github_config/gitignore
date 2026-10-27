@@ -116,6 +116,7 @@ logs/
 
 # --- Crash dumps (investigate before deleting, don't commit) ---
 core
+!core/
 core.[0-9]*
 *.core
 vgcore.*
