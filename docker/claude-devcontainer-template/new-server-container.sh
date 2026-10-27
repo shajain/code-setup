@@ -2,7 +2,8 @@
 # Usage: ./new-server-container.sh [options] /path/to/project
 #
 # Options:
-#   -p PORT                 SSH port on the server's localhost (default: 2222)
+#   -p PORT                 SSH port on the server's localhost (default: the first
+#                           free port from 2222 up; the server may be shared)
 #   -m SRC[:DEST][:ro]      also mount the server folder SRC into the container,
 #                           at DEST (default: the same path as on the server).
 #                           Add :ro to make it read-only. Repeat -m for more folders.
@@ -52,7 +53,7 @@ usage() {
   exit 1
 }
 
-PORT=2222
+PORT=""
 MOUNT_SPECS=()
 ENV_NAME=""
 PY_VERSION="3.12"
@@ -67,7 +68,8 @@ while getopts ":p:m:e:y:h" opt; do
 done
 shift $((OPTIND - 1))
 [ $# -eq 1 ] || usage
-case "$PORT" in ''|*[!0-9]*) echo "Port must be a number: $PORT"; exit 1 ;; esac
+case "$PORT" in ''|[0-9]*) ;; *) echo "Port must be a number: $PORT"; exit 1 ;; esac
+case "$PORT" in *[!0-9]*) echo "Port must be a number: $PORT"; exit 1 ;; esac
 
 PROJECT="$(cd "$1" 2>/dev/null && pwd)" || { echo "Project folder does not exist: $1"; exit 1; }
 CONTAINER_USER="${CONTAINER_USER:-shajain}"
@@ -121,6 +123,29 @@ done
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
+# Is anything (another user's container, any program) listening on this port?
+port_in_use() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0
+  if [ -z "${DRY_RUN:-}" ] && $DOCKER ps --format '{{.Ports}}' 2>/dev/null | grep -q ":$1->"; then
+    return 0
+  fi
+  return 1
+}
+
+if [ -n "$PORT" ]; then
+  if port_in_use "$PORT"; then
+    echo "Port $PORT is already in use on this server. Pick another with -p, or leave -p out"
+    echo "to use the first free port from 2222 up."
+    exit 1
+  fi
+else
+  for p in $(seq 2222 2399); do
+    port_in_use "$p" || { PORT="$p"; break; }
+  done
+  [ -n "$PORT" ] || { echo "No free port between 2222 and 2399; pick one with -p."; exit 1; }
+  echo "Using SSH port $PORT."
+fi
+
 if [ ! -f "$AUTH_KEYS" ]; then
   echo "No $AUTH_KEYS on this server. The container lets in the same SSH keys"
   echo "that can log in to this server, so add your Mac's public key there first."
@@ -301,19 +326,36 @@ if [ ! -x "$CONDA_DIR/bin/conda" ]; then
     || { echo "WARNING: Miniforge install failed."; rm -f /tmp/miniforge.sh; exit 1; }
   rm -f /tmp/miniforge.sh
 else
-  echo "conda: using shared $CONDA_DIR"
+  # conda records its install path in its own files, so a copied or moved
+  # installation points at a path that doesn't exist here.
+  shebang="$(head -n1 "$CONDA_DIR/bin/conda" 2>/dev/null)"
+  case "$shebang" in
+    "#!$CONDA_DIR/bin/python"*) echo "conda: using shared $CONDA_DIR" ;;
+    *)
+      echo "WARNING: $CONDA_DIR was installed at a different path and then moved or copied"
+      echo "         (its conda starts with: ${shebang:-<unreadable>}). conda can't be moved."
+      echo "         On the server, set it aside so setup installs a fresh one:"
+      echo "           mv $CONDA_DIR $CONDA_DIR.moved"
+      echo "         then run: dev-setup"
+      exit 1 ;;
+  esac
 fi
 
 # Keep every environment and package cache inside the shared miniforge folder.
 # Without this, conda falls back to ~/.conda (this container's home) whenever
 # it decides it can't write to miniforge3.
-cat > "$CONDA_DIR/.condarc" <<CONDARC
-envs_dirs:
-  - $CONDA_DIR/envs
-pkgs_dirs:
-  - $CONDA_DIR/pkgs
-CONDARC
+# Miniforge keeps its own settings (the conda-forge channel) in this same file,
+# so add to it rather than replacing it.
+RC="$CONDA_DIR/.condarc"
 mkdir -p "$CONDA_DIR/envs" "$CONDA_DIR/pkgs"
+"$CONDA_DIR/bin/conda" config --file "$RC" --get envs_dirs 2>/dev/null | grep -qF "$CONDA_DIR/envs" \
+  || "$CONDA_DIR/bin/conda" config --file "$RC" --prepend envs_dirs "$CONDA_DIR/envs"
+"$CONDA_DIR/bin/conda" config --file "$RC" --get pkgs_dirs 2>/dev/null | grep -qF "$CONDA_DIR/pkgs" \
+  || "$CONDA_DIR/bin/conda" config --file "$RC" --prepend pkgs_dirs "$CONDA_DIR/pkgs"
+# Repair an install whose channel setting was lost (an earlier version of this
+# script overwrote the file).
+"$CONDA_DIR/bin/conda" config --file "$RC" --get channels 2>/dev/null | grep -q . \
+  || "$CONDA_DIR/bin/conda" config --file "$RC" --add channels conda-forge
 if [ -f "$HOME/.condarc" ] && grep -qE 'envs_dirs|pkgs_dirs' "$HOME/.condarc"; then
   echo "WARNING: $HOME/.condarc also sets envs_dirs/pkgs_dirs and takes priority;"
   echo "         remove those lines so environments stay in $CONDA_DIR/envs."
@@ -449,7 +491,7 @@ $DOCKER build -t "$IMAGE" \
   --build-arg PY_VERSION="$PY_VERSION" \
   "$BUILD_DIR"
 
-echo "Starting container $NAME..."
+echo "Starting container $NAME on port $PORT..."
 # The SSH port is bound to 127.0.0.1 only: it's reachable through the server
 # (ProxyJump), not from the network.
 $DOCKER run -d --name "$NAME" --hostname "$NAME" --restart unless-stopped \
@@ -460,7 +502,14 @@ $DOCKER run -d --name "$NAME" --hostname "$NAME" --restart unless-stopped \
   -v "$NAME-hostkeys:/etc/ssh/hostkeys" \
   -v "$AUTH_KEYS:/etc/ssh/keys/$CONTAINER_USER:ro" \
   "${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"}" \
-  "$IMAGE" >/dev/null
+  "$IMAGE" >/dev/null || {
+  # docker run can create the container and then fail (e.g. the port was taken
+  # in the meantime); remove the leftover so running this again works.
+  $DOCKER rm -f "$NAME" >/dev/null 2>&1
+  echo "Could not start the container (see the error above). Nothing was left behind;"
+  echo "fix the problem and run this script again."
+  exit 1
+}
 
 for _ in $(seq 1 20); do
   $DOCKER exec "$NAME" pgrep -x sshd >/dev/null 2>&1 && break
