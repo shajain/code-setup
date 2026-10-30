@@ -26,7 +26,7 @@
 #     so files in mounted folders keep the right owner
 #   - /workspaces is owned by you and can be entered
 #   - git uses your Mac's SSH agent (forwarded over SSH); no key files copied
-#   - Claude Code and the AI commenting tool are installed, and
+#   - Claude Code (shared program and login) and the AI commenting tool are installed, and
 #     `ai-commenting build .` / `install-agent .` are run
 #
 # Shared setup folder (always mounted, same path inside every container):
@@ -34,10 +34,15 @@
 #                                   one environment per project in miniforge3/envs
 #   $SETUP_DIR/AI-commenting-tool   the tool's clone (the package source)
 #   $SETUP_DIR/pip-cache            downloaded packages, reused by every environment
+#   $SETUP_DIR/claude-home          the Claude Code program, installed once
+#   $SETUP_DIR/claude-config        Claude Code's login and settings (CLAUDE_CONFIG_DIR),
+#                                   so you log in once and every container is logged in
 # conda and the clone are installed once and reused by every container. Each
 # project's environment gets the tool with an editable pip install from the
 # shared clone, so a 'git pull' there updates the tool in every environment.
 # In any other environment, run: install-ai-commenting
+# Claude Code doesn't update itself here (all containers share one copy); update
+# it for every container with: dev-update-claude
 #
 # Environment overrides:
 #   CONTAINER_USER  user inside the container   (default: shajain)
@@ -219,14 +224,18 @@ RUN mkdir -p /workspaces /run/sshd /etc/ssh/keys /etc/ssh/hostkeys \
 RUN printf 'PROJECT=%s\nTOOL_REPO=%s\nSETUP_DIR=%s\nCONDA_DIR=%s\nTOOL_DIR=%s\nPROJECT_ENV=%s\nENV_DIR=%s\nPY_VERSION=%s\nPIP_CACHE_DIR=%s\n' \
       "$WORKDIR" "$TOOL_REPO" "$SETUP_DIR" "$SETUP_DIR/miniforge3" "$SETUP_DIR/AI-commenting-tool" \
       "$ENV_NAME" "$SETUP_DIR/miniforge3/envs/$ENV_NAME" "$PY_VERSION" "$SETUP_DIR/pip-cache" \
-      > /etc/dev-container.env
+      > /etc/dev-container.env \
+ && printf 'CLAUDE_HOME=%s\nCLAUDE_BIN_DIR=%s\nCLAUDE_CONFIG_DIR=%s\nDISABLE_AUTOUPDATER=1\n' \
+      "$SETUP_DIR/claude-home" "$SETUP_DIR/claude-home/.local/bin" "$SETUP_DIR/claude-config" \
+      >> /etc/dev-container.env \
+ && printf 'CLAUDE_CONFIG_DIR=%s\nDISABLE_AUTOUPDATER=1\n' "$SETUP_DIR/claude-config" >> /etc/environment
 
 COPY sshd.conf /etc/ssh/sshd_config.d/dev-container.conf
 RUN echo "AllowUsers $USER_NAME" >> /etc/ssh/sshd_config.d/dev-container.conf
-COPY entrypoint.sh dev-setup dev-install-extension install-ai-commenting /usr/local/bin/
+COPY entrypoint.sh dev-setup dev-install-extension install-ai-commenting dev-update-claude /usr/local/bin/
 COPY bashrc-extra /tmp/bashrc-extra
 COPY profile-path.sh /etc/profile.d/dev-container-path.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/dev-setup /usr/local/bin/dev-install-extension /usr/local/bin/install-ai-commenting \
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/dev-setup /usr/local/bin/dev-install-extension /usr/local/bin/install-ai-commenting /usr/local/bin/dev-update-claude \
  && cat /tmp/bashrc-extra >> /etc/bash.bashrc && rm /tmp/bashrc-extra
 
 EXPOSE 22
@@ -260,19 +269,24 @@ EOF
 
 cat > "$BUILD_DIR/profile-path.sh" <<'EOF'
 . /etc/dev-container.env
-export PATH="$CONDA_DIR/bin:$HOME/.local/bin:$PATH"
+export PATH="$CONDA_DIR/bin:$CLAUDE_BIN_DIR:$HOME/.local/bin:$PATH"
+export CLAUDE_CONFIG_DIR DISABLE_AUTOUPDATER
 EOF
 
 cat > "$BUILD_DIR/bashrc-extra" <<'EOF'
 
 # --- dev container -----------------------------------------------------------
 . /etc/dev-container.env
-export PATH="$CONDA_DIR/bin:$HOME/.local/bin:$PATH"
+# Shared Claude Code comes before ~/.local/bin, so an older per-container copy
+# there can't shadow it.
+export PATH="$CONDA_DIR/bin:$CLAUDE_BIN_DIR:$HOME/.local/bin:$PATH"
+export CLAUDE_CONFIG_DIR DISABLE_AUTOUPDATER
 [ -f "$CONDA_DIR/etc/profile.d/conda.sh" ] && . "$CONDA_DIR/etc/profile.d/conda.sh"
 export PIP_CACHE_DIR
 # Run setup if it never finished in this container's home, or if the project's
 # environment or the tool in it isn't there yet.
-if { [ ! -f "$HOME/.dev-setup-done" ] || [ ! -x "$ENV_DIR/bin/ai-commenting" ]; } \
+if { [ ! -f "$HOME/.dev-setup-done" ] || [ ! -x "$ENV_DIR/bin/ai-commenting" ] \
+     || [ ! -x "$CLAUDE_BIN_DIR/claude" ] || [ ! -L "$HOME/.claude" ]; } \
    && [ -z "${DEV_SETUP_RUNNING:-}" ]; then
   /usr/local/bin/dev-setup
 fi
@@ -289,7 +303,8 @@ cat > "$BUILD_DIR/dev-setup" <<'EOF'
 set -uo pipefail
 export DEV_SETUP_RUNNING=1
 . /etc/dev-container.env
-export PATH="$CONDA_DIR/bin:$HOME/.local/bin:$PATH"
+export PATH="$CONDA_DIR/bin:$CLAUDE_BIN_DIR:$HOME/.local/bin:$PATH"
+export CLAUDE_CONFIG_DIR DISABLE_AUTOUPDATER
 export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
 
 echo "==> Dev container setup"
@@ -394,15 +409,44 @@ else
   echo "ai-commenting: already installed in '$PROJECT_ENV'"
 fi
 
-flock -u 9
-
-# 5. Per-container parts (in this container's home volume).
-if ! command -v claude >/dev/null 2>&1; then
-  echo "Installing Claude Code..."
-  curl -fsSL https://claude.ai/install.sh | bash || echo "WARNING: Claude Code install failed."
+# 5. Claude Code, shared: the program is installed once into $CLAUDE_HOME.
+#    The installer puts it under $HOME/.local, so it runs with HOME pointed at
+#    the shared folder.
+mkdir -p "$CLAUDE_HOME"
+if [ ! -x "$CLAUDE_BIN_DIR/claude" ]; then
+  echo "Installing Claude Code into $CLAUDE_HOME (first container only)..."
+  curl -fsSL https://claude.ai/install.sh | HOME="$CLAUDE_HOME" bash \
+    || echo "WARNING: Claude Code install failed."
+else
+  echo "Claude Code: using shared $("$CLAUDE_BIN_DIR/claude" --version 2>/dev/null | head -n1)"
 fi
 
-# 6. This project, with the project's environment.
+# 6. Claude Code's login and settings, shared via CLAUDE_CONFIG_DIR.
+mkdir -p "$CLAUDE_CONFIG_DIR" && chmod 700 "$CLAUDE_CONFIG_DIR"
+# Reuse a login made earlier in this container, if the shared folder has none yet.
+if [ ! -f "$CLAUDE_CONFIG_DIR/.credentials.json" ] && [ -f "$HOME/.claude/.credentials.json" ] \
+   && [ ! -L "$HOME/.claude" ]; then
+  cp -a "$HOME/.claude/." "$CLAUDE_CONFIG_DIR/"
+  [ -f "$HOME/.claude.json" ] && [ ! -L "$HOME/.claude.json" ] && [ ! -f "$CLAUDE_CONFIG_DIR/.claude.json" ] \
+    && cp -a "$HOME/.claude.json" "$CLAUDE_CONFIG_DIR/.claude.json"
+  echo "Moved this container's Claude login into the shared folder."
+fi
+[ -f "$CLAUDE_CONFIG_DIR/.claude.json" ] || echo '{}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+# Point the usual locations at the shared folder too, for tools that read them
+# directly (Claude Code itself uses CLAUDE_CONFIG_DIR).
+for pair in ".claude:$CLAUDE_CONFIG_DIR" ".claude.json:$CLAUDE_CONFIG_DIR/.claude.json"; do
+  name="${pair%%:*}"; target="${pair#*:}"
+  if [ -L "$HOME/$name" ]; then
+    ln -sfn "$target" "$HOME/$name"
+  else
+    [ -e "$HOME/$name" ] && mv "$HOME/$name" "$HOME/$name.per-container.bak"
+    ln -s "$target" "$HOME/$name"
+  fi
+done
+
+flock -u 9
+
+# 7. This project, with the project's environment.
 export PATH="$ENV_DIR/bin:$PATH"
 cd "$PROJECT"
 ai-commenting build . || echo "WARNING: 'ai-commenting build .' failed."
@@ -434,6 +478,23 @@ echo "Installing the AI commenting tool into $("$PY" -c 'import sys; print(sys.p
 "$PY" -m pip install -e "$TOOL_DIR" || { echo "WARNING: pip install failed."; exit 1; }
 EOF
 
+cat > "$BUILD_DIR/dev-update-claude" <<'EOF'
+#!/usr/bin/env bash
+# Updates the shared Claude Code for every container. Run in any container.
+set -uo pipefail
+. /etc/dev-container.env
+export CLAUDE_CONFIG_DIR
+exec 9>"$SETUP_DIR/.setup.lock"
+flock -w 600 9 || { echo "Another container is running setup; try again later."; exit 1; }
+before="$("$CLAUDE_BIN_DIR/claude" --version 2>/dev/null | head -n1)"
+# Re-running the installer fetches the latest release into the shared folder.
+curl -fsSL https://claude.ai/install.sh | HOME="$CLAUDE_HOME" bash \
+  || { echo "WARNING: update failed."; exit 1; }
+after="$("$CLAUDE_BIN_DIR/claude" --version 2>/dev/null | head -n1)"
+echo "Claude Code: ${before:-not installed} -> ${after:-?}"
+echo "Already-running Claude sessions keep the old version until restarted."
+EOF
+
 cat > "$BUILD_DIR/dev-install-extension" <<'EOF'
 #!/usr/bin/env bash
 # Installs the AI commenting editor extension into VS Code's (or Cursor's)
@@ -444,30 +505,92 @@ say() { [ -n "$QUIET" ] || echo "$@"; }
 . /etc/dev-container.env
 [ -d "$TOOL_DIR" ] || exit 0
 
-if ls -d "$HOME"/.vscode-server/extensions/*ai-commenting* \
-         "$HOME"/.cursor-server/extensions/*ai-commenting* >/dev/null 2>&1; then
-  say "AI commenting extension already installed."
+PY="$ENV_DIR/bin/python"
+
+# --- Install the extension only when the tool's version is newer ------------
+# Cursor/VS Code can't cleanly reinstall the SAME version of an extension
+# that's in use, so this only ever installs a higher version number. To ship a
+# changed extension, raise "version" in vscode-extension/package.json.
+EDITOR_DIRS=("$HOME/.vscode-server" "$HOME/.vscode-server-insiders" "$HOME/.cursor-server")
+PKG="$TOOL_DIR/vscode-extension/package.json"
+BUILD_VER="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$PKG" 2>/dev/null)"
+if [ -z "$BUILD_VER" ]; then
+  echo "WARNING: can't read the extension's version from $PKG"
   exit 0
 fi
 
-SERVER="$(ls -t "$HOME"/.vscode-server/bin/*/bin/code-server \
-                "$HOME"/.vscode-server/cli/servers/*/server/bin/code-server \
-                "$HOME"/.cursor-server/bin/*/bin/cursor-server \
-                "$HOME"/.cursor-server/cli/servers/*/server/bin/cursor-server 2>/dev/null | head -n1)"
+# Highest installed version, ignoring copies already marked for removal.
+# Extension folders are named <publisher>.<name>-<version>.
+installed_version() {
+  local d ext base
+  for d in "${EDITOR_DIRS[@]}"; do
+    for ext in "$d"/extensions/*ai-commenting*; do
+      [ -d "$ext" ] || continue
+      base="$(basename "$ext")"
+      grep -qF "\"$base\"" "$d/extensions/.obsolete" 2>/dev/null && continue
+      echo "${base##*-}"
+    done
+  done | sort -V | tail -n1
+}
+version_gt() {   # is $1 a higher version than $2?
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+
+INSTALLED="$(installed_version)"
+if [ -n "$INSTALLED" ] && ! version_gt "$BUILD_VER" "$INSTALLED"; then
+  if [ "$INSTALLED" = "$BUILD_VER" ]; then
+    say "AI commenting extension $INSTALLED is installed and up to date."
+  else
+    say "Installed AI commenting extension $INSTALLED is newer than the tool's $BUILD_VER; leaving it."
+  fi
+  say "(To install a changed extension, raise \"version\" in $PKG.)"
+  exit 0
+fi
+
+# This exact version waiting to be removed blocks installing it again.
+for d in "${EDITOR_DIRS[@]}"; do
+  if grep -qF -- "-$BUILD_VER\"" "$d/extensions/.obsolete" 2>/dev/null \
+     && grep -qi 'ai-commenting' "$d/extensions/.obsolete"; then
+    say "Version $BUILD_VER of the extension is waiting to be removed by the editor."
+    say "Restart the editor's server first (close the window and reconnect), then run this again."
+    exit 0
+  fi
+done
+
+# Find the editor's server program (VS Code: code-server, Cursor: cursor-server),
+# whatever folder layout this editor version uses. Newest first.
+find_editor_server() {
+  local d
+  for d in "${EDITOR_DIRS[@]}"; do
+    [ -d "$d" ] || continue
+    find "$d" -maxdepth 8 -type f -perm -u+x \
+         \( -name code-server -o -name code-server-insiders -o -name cursor-server \) \
+         -not -path '*/remote-cli/*' -printf '%T@ %p\n' 2>/dev/null
+  done | sort -rn | head -n1 | cut -d' ' -f2-
+}
+SERVER="$(find_editor_server)"
 if [ -z "$SERVER" ]; then
-  say "Editor server not found yet; connect with VS Code first, then run: dev-install-extension"
+  say "Editor server not found yet; connect with VS Code or Cursor first, then run this again."
+  say "(looked in ~/.vscode-server, ~/.vscode-server-insiders and ~/.cursor-server)"
   exit 0
 fi
 
+# Build the .vsix (without --install, which needs the editor's 'code' command).
 cd "$TOOL_DIR"
-"$ENV_DIR/bin/python" vscode-extension/package_vsix.py >/dev/null 2>&1 || true
-VSIX="$(ls -t vscode-extension/dist/*.vsix 2>/dev/null | head -n1)"
+"$PY" vscode-extension/package_vsix.py >/dev/null 2>&1 || true
+VSIX="$(ls -t vscode-extension/dist/*-"$BUILD_VER".vsix 2>/dev/null | head -n1)"
+[ -n "$VSIX" ] || VSIX="$(ls -t vscode-extension/dist/*.vsix 2>/dev/null | head -n1)"
 [ -n "$VSIX" ] || { echo "WARNING: could not build the extension (.vsix not found)."; exit 0; }
 
+# --force here only ever replaces a LOWER version, never the same one.
 if "$SERVER" --install-extension "$VSIX" --force >/dev/null; then
-  echo "AI commenting extension installed. Run 'Developer: Reload Window' to activate it."
+  if [ -n "$INSTALLED" ]; then
+    echo "AI commenting extension updated $INSTALLED -> $BUILD_VER. Run 'Developer: Reload Window' to use it."
+  else
+    echo "AI commenting extension $BUILD_VER installed. Run 'Developer: Reload Window' to activate it."
+  fi
 else
-  echo "WARNING: extension install failed. Try: dev-install-extension"
+  echo "WARNING: extension install failed; see the error above."
 fi
 EOF
 
@@ -545,8 +668,8 @@ $(for m in "${MOUNT_SUMMARY[@]+"${MOUNT_SUMMARY[@]}"}"; do echo "  Mount:   $m";
 Mounts are fixed when a container is created. To change them later:
   $DOCKER rm -f $NAME
   $RECREATE   (edit the -m options)
-Your home folder (Claude Code, editor, settings) is kept in a volume, and conda
-and the tool are in $SETUP_DIR, so both survive this.
+Your home folder (editor, shell settings) is kept in a volume, and conda, the
+tool and Claude Code (program and login) are in $SETUP_DIR, so all survive this.
 
 1. On your Mac, add this to ~/.ssh/config:
 
@@ -566,5 +689,7 @@ Host $NAME
    ai-commenting build/install-agent, editor extension). Then: Developer: Reload Window.
    To re-run it later: dev-setup
 
-Run 'claude' once in $WORKDIR and accept the trust prompt.
+Run 'claude' once in $WORKDIR and accept the trust prompt. The first time in any
+container, also log in; every other container then shares that login.
+Update Claude Code for all containers with: dev-update-claude
 EOF
